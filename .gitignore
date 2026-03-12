@@ -1,0 +1,4 @@
+*.output
+verification-results/
+.aws-sam/
+.kiro/

@@ -1,0 +1,61 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      dotnet: 6.0
+    commands:
+      - echo "Installing Dafny"
+      - wget https://github.com/dafny-lang/dafny/releases/latest/download/dafny-4.5.0-x64-ubuntu-20.04.zip
+      - unzip dafny-4.5.0-x64-ubuntu-20.04.zip -d /opt/dafny
+      - export PATH="/opt/dafny/dafny:$PATH"
+      - dafny --version
+
+  pre_build:
+    commands:
+      - echo "Downloading .dfy files from S3"
+      - aws s3 sync s3://${DFY_BUCKET}/dfy-files/ ./dfy-files/ --exclude "*" --include "*.dfy"
+      - ls -la ./dfy-files/
+
+  build:
+    commands:
+      - echo "Verifying Dafny files"
+      - VERIFICATION_FAILED=0
+      - FAILED_FILES=""
+      - mkdir -p ./verification-results
+      - |
+        for file in ./dfy-files/*.dfy; do
+          filename=$(basename "$file")
+          echo "Verifying $file"
+          dafny verify "$file" > "./verification-results/${filename}.output" 2>&1
+          cat "./verification-results/${filename}.output"
+          if ! grep -q "0 errors" "./verification-results/${filename}.output"; then
+            echo "FAILED: $file did not verify successfully"
+            VERIFICATION_FAILED=1
+            FAILED_FILES="${FAILED_FILES}${filename}\n"
+          fi
+        done
+      - |
+        if [ $VERIFICATION_FAILED -eq 1 ]; then
+          echo -e "Verification Failed\n\nFailed files:\n${FAILED_FILES}" > ./verification-results/failure-summary.txt
+          cat ./verification-results/failure-summary.txt
+          aws s3 cp ./verification-results/ s3://${DFY_BUCKET}/verification-failures/ --recursive
+          echo "Failure logs uploaded to s3://${DFY_BUCKET}/verification-failures/"
+          exit 1
+        fi
+
+  post_build:
+    commands:
+      - |
+        if [ $CODEBUILD_BUILD_SUCCEEDING -eq 1 ]; then
+          echo "All Dafny files verified successfully (100% mathematical verification)"
+          echo "SUCCESS" > ./verification-results/status.txt
+          aws s3 cp ./verification-results/status.txt s3://${DFY_BUCKET}/verification-success/status.txt
+        else
+          echo "Verification failed - stopping pipeline"
+          exit 1
+        fi
+
+artifacts:
+  files:
+    - '**/*'
